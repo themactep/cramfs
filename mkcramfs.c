@@ -100,7 +100,7 @@ static int warn_dev, warn_gid, warn_namelen, warn_skip, warn_size, warn_uid;
 /* In-core version of inode / directory entry. */
 struct entry {
 	/* stats */
-	unsigned char *name;
+	char *name;
 	unsigned int mode, size, uid, gid;
 
 	/* these are only used for non-empty files */
@@ -218,10 +218,9 @@ static void eliminate_doubles(struct entry *root, struct entry *orig) {
  * We define our own sorting function instead of using alphasort which
  * uses strcoll and changes ordering based on locale information.
  */
-static int cramsort (const void *a, const void *b)
+static int cramsort (const struct dirent **a, const struct dirent **b)
 {
-	return strcmp ((*(const struct dirent **) a)->d_name,
-		       (*(const struct dirent **) b)->d_name);
+	return strcmp ((*a)->d_name, (*b)->d_name);
 }
 
 static unsigned int parse_directory(struct entry *root_entry, const char *name, struct entry **prev, loff_t *fslen_ub)
@@ -294,10 +293,10 @@ static unsigned int parse_directory(struct entry *root_entry, const char *name, 
 			namelen = CRAMFS_MAXPATHLEN;
 			warn_namelen = 1;
 			/* the first lost byte must not be a trail byte */
-			while ((entry->name[namelen] & 0xc0) == 0x80) {
+			while (((unsigned char)entry->name[namelen] & 0xc0) == 0x80) {
 				namelen--;
 				/* are we reasonably certain it was UTF-8 ? */
-				if (entry->name[namelen] < 0x80 || !namelen) {
+				if ((unsigned char)entry->name[namelen] < 0x80 || !namelen) {
 					die(MKFS_ERROR, 0, "cannot truncate filenames not encoded in UTF-8");
 				}
 			}
@@ -396,10 +395,13 @@ static unsigned int write_superblock(struct entry *root, char *base, int size)
 	super->fsid.files = total_nodes;
 
 	memset(super->name, 0x00, sizeof(super->name));
-	if (opt_name)
-		strncpy(super->name, opt_name, sizeof(super->name));
-	else
-		strncpy(super->name, "Compressed", sizeof(super->name));
+	if (opt_name) {
+		strncpy((char *)super->name, opt_name, sizeof(super->name) - 1);
+		super->name[sizeof(super->name) - 1] = '\0';
+	} else {
+		strncpy((char *)super->name, "Compressed", sizeof(super->name) - 1);
+		super->name[sizeof(super->name) - 1] = '\0';
+	}
 
 	super->root.mode = root->mode;
 	super->root.uid = root->uid;
@@ -430,7 +432,7 @@ static void set_data_offset(struct entry *entry, char *base, unsigned long offse
  */
 static void print_node(struct entry *e)
 {
-	char info[10];
+	char info[16];  /* Increased buffer size to accommodate larger numbers */
 	char type = '?';
 
 	if (S_ISREG(e->mode)) type = 'f';
@@ -443,11 +445,11 @@ static void print_node(struct entry *e)
 
 	if (S_ISCHR(e->mode) || (S_ISBLK(e->mode))) {
 		/* major/minor numbers can be as high as 2^12 or 4096 */
-		snprintf(info, 10, "%4d,%4d", major(e->size), minor(e->size));
+		snprintf(info, sizeof(info), "%4d,%4d", major(e->size), minor(e->size));
 	}
 	else {
 		/* size be as high as 2^24 or 16777216 */
-		snprintf(info, 10, "%9d", e->size);
+		snprintf(info, sizeof(info), "%9d", e->size);
 	}
 
 	printf("%c %04o %s %5d:%-3d %s\n",
@@ -596,7 +598,7 @@ static unsigned int do_compress(char *base, unsigned int offset, char const *nam
 			input = blksize;
 		size -= input;
 		if (!(opt_holes && is_zero (uncompressed, input))) {
-			err = compress2(base + curr, &len, uncompressed, input, Z_BEST_COMPRESSION);
+			err = compress2((unsigned char *)(base + curr), &len, (unsigned char *)uncompressed, input, Z_BEST_COMPRESSION);
 			if (err != Z_OK) {
 				die(MKFS_ERROR, 0, "compression error: %s", zError(err));
 			}
@@ -606,7 +608,7 @@ static unsigned int do_compress(char *base, unsigned int offset, char const *nam
 
 		if (len > blksize*2) {
 			/* (I don't think this can happen with zlib.) */
-			die(MKFS_ERROR, 0, "AIEEE: block \"compressed\" to > 2*blocklength (%ld)", len);
+			die(MKFS_ERROR, 0, "AIEEE: block \"compressed\" to > 2*blocklength (%lu)", (unsigned long)len);
 		}
 
 		*(u32 *) (base + offset) = curr;
@@ -704,6 +706,7 @@ int main(int argc, char **argv)
 		switch (c) {
 		case 'h':
 			usage(MKFS_OK);
+			break;  /* usage() calls exit(), but add break to silence warning */
 		case 'E':
 			opt_errors = 1;
 			break;
@@ -769,8 +772,8 @@ int main(int argc, char **argv)
 
 	if (fslen_ub > MAXFSLEN) {
 		fprintf(stderr,
-			"warning: estimate of required size (upper bound) is %LdMB, but maximum image size is %uMB, we might die prematurely\n",
-			fslen_ub >> 20,
+			"warning: estimate of required size (upper bound) is %ldMB, but maximum image size is %uMB, we might die prematurely\n",
+			(long)(fslen_ub >> 20),
 			MAXFSLEN >> 20);
 		fslen_ub = MAXFSLEN;
 	}
@@ -808,28 +811,28 @@ int main(int argc, char **argv)
 	}
 
 	offset = write_directory_structure(root_entry->child, rom_image, offset);
-	printf("Directory data: %d bytes\n", offset);
+	printf("Directory data: %ld bytes\n", (long)offset);
 
 	offset = write_data(root_entry, rom_image, offset);
 
 	/* We always write a multiple of blksize bytes, so that
 	   losetup works. */
 	offset = ((offset - 1) | (blksize - 1)) + 1;
-	printf("Everything: %d kilobytes\n", offset >> 10);
+	printf("Everything: %ld kilobytes\n", (long)(offset >> 10));
 
 	/* Write the superblock now that we can fill in all of the fields. */
 	write_superblock(root_entry, rom_image+opt_pad, offset);
-	printf("Super block: %d bytes\n", sizeof(struct cramfs_super));
+	printf("Super block: %lu bytes\n", (unsigned long)sizeof(struct cramfs_super));
 
 	/* Put the checksum in. */
 	crc = crc32(0L, Z_NULL, 0);
-	crc = crc32(crc, (rom_image+opt_pad), (offset-opt_pad));
+	crc = crc32(crc, (unsigned char *)(rom_image+opt_pad), (offset-opt_pad));
 	((struct cramfs_super *) (rom_image+opt_pad))->fsid.crc = crc;
 	printf("CRC: %x\n", crc);
 
 	/* Check to make sure we allocated enough space. */
 	if (fslen_ub < offset) {
-		die(MKFS_ERROR, 0, "not enough space allocated for ROM image (%Ld allocated, %d used)", fslen_ub, offset);
+		die(MKFS_ERROR, 0, "not enough space allocated for ROM image (%ld allocated, %ld used)", (long)fslen_ub, (long)offset);
 	}
 
 	written = write(fd, rom_image, offset);

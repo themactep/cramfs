@@ -669,6 +669,7 @@ int main(int argc, char **argv)
 		switch (c) {
 		case 'h':
 			usage(FSCK_OK);
+			break;  /* usage() calls exit(), but add break to silence warning */
 		case 'x':
 #ifdef INCLUDE_FS_TESTS
 			opt_extract = 1;
